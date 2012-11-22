@@ -1,0 +1,10 @@
+#!/usr/bin/make -f
+
+DPKG_EXPORT_BUILDFLAGS=1
+include /usr/share/dpkg/buildflags.mk
+
+%:
+	dh --with python2 $@
+
+override_dh_auto_install:
+	dh_auto_install -- PYTHON_INSTALL_PARAMS=--install-layout=deb

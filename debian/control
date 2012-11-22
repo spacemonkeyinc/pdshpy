@@ -1,0 +1,20 @@
+Source: pdshpy
+Section: python
+Priority: optional
+Maintainer: paul cannon <paul@spacemonkey.com>
+Build-Depends: debhelper (>= 7.0.50~), python, python2.7, python2.7-dev,
+ dpkg-dev (>= 1.16.1~)
+Standards-Version: 3.9.3
+XS-Python-Version: 2.7
+
+Package: pdshpy
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}, ${python:Depends}, python,
+ pdsh (>= 2.26), pdsh (<< 2.29)
+Provides: ${python:Provides}
+Description: Shim allowing pdsh modules to be written in Python
+ The pdsh "pdshpy" module will load a specific Python module (or package) and
+ call into it to provide pdsh functionality, such as hostname enumeration,
+ filtering, excluding, and so on.
+ .
+ It currently can only attach to one Python module at a time.
