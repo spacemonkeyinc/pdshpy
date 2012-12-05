@@ -33,6 +33,7 @@ static hostlist_t pdshpy_wcoll(opt_t *pdsh_opts);
 static int pdshpy_postop(opt_t *);
 static int pdshpy_fini(void);
 static PyObject *register_option(PyObject *self, PyObject *args);
+static PyObject *pdshpy_rcmd_register_defaults(PyObject *self, PyObject *args);
 
 /* the default name of the Python module to use for the pdsh functionality */
 #define PDSHPY_PYTHON_MODULE "pdshpy_module"
@@ -59,14 +60,14 @@ static int debuglevel = 0;
 static int options_registered = 0;
 
 #define DBG(tmpl, args...) \
-    if (debuglevel > 0) \
-        fprintf(stderr, PDSHPY_LOG_PREFIX ": " tmpl "\n", ## args)
+    ({ if (debuglevel > 0) \
+            fprintf(stderr, PDSHPY_LOG_PREFIX ": " tmpl "\n", ## args); })
 
 #define ERR(tmpl, args...) \
-    fprintf(stderr, PDSHPY_LOG_PREFIX ": " tmpl "\n", ## args)
+    ({ fprintf(stderr, PDSHPY_LOG_PREFIX ": " tmpl "\n", ## args); })
 
 #define PYERR(tmpl, args...) \
-    do { ERR(tmpl, ## args); PyErr_Print(); } while (0)
+    ({ ERR(tmpl, ## args); PyErr_Print(); })
 
 static PyObject *pymodule = NULL;
 static PyObject *pymodule_util = NULL;
@@ -103,6 +104,8 @@ struct pdsh_module pdsh_module_info = {
 static PyMethodDef pdshpy_methods[] = {
     {"_register_option", register_option, METH_VARARGS,
      "Register a pdsh option to be recognized by this module."},
+    {"_rcmd_register_defaults", pdshpy_rcmd_register_defaults, METH_VARARGS,
+     "Register default rcmd parameters for given hosts"},
     {NULL, NULL, 0, NULL}
 };
 
@@ -161,6 +164,50 @@ register_option(PyObject *self, PyObject *args)
     {
         PyErr_SetString(PyExc_ValueError,
                         "Pdsh refused to allow option to be registered");
+        return NULL;
+    }
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+pdshpy_rcmd_register_defaults(PyObject *self, PyObject *args)
+{
+    const char *hostliststr = NULL;
+    const char *rcmd_module_name = NULL;
+    const char *username = NULL;
+    char *nonconst_hostliststr = NULL;
+    char *nonconst_rcmd_module_name = NULL;
+    char *nonconst_username = NULL;
+    int result = 0;
+
+    if (!PyArg_ParseTuple(args, "zsz",
+                          &hostliststr, &rcmd_module_name, &username))
+        return NULL;
+
+    /* pdsh source doesn't use const qualifiers, and I haven't dug deep enough
+     * to be sure it's not going to mess with the contents of these strings */
+    nonconst_hostliststr = Strdup(hostliststr);
+    nonconst_rcmd_module_name = Strdup(rcmd_module_name);
+    nonconst_username = Strdup(username);
+
+    result = rcmd_register_defaults(nonconst_hostliststr,
+                                    nonconst_rcmd_module_name,
+                                    nonconst_username);
+
+    Free((void **)(&nonconst_hostliststr));
+    Free((void **)(&nonconst_rcmd_module_name));
+    Free((void **)(&nonconst_username));
+
+    if (result < 0)
+    {
+        if (hostliststr == NULL)
+            hostliststr = "(null)";
+        if (username == NULL)
+            username = "(null)";
+        PyErr_Format(PyExc_ValueError,
+                     "Failed to register rcmd defaults for '%s', '%s', '%s'",
+                     hostliststr, rcmd_module_name, username);
         return NULL;
     }
 
@@ -292,15 +339,14 @@ make_pyobject_from_pdsh_opt(opt_t *pdsh_opts)
     if (pyopts == NULL)
         return NULL;
 
-#define SETATTR(name, pyinitializer)                                        \
-    do {                                                                    \
-        if ((PyObject_SetAttrString(pyopts, #name,                          \
-                                    (pyinitializer)(pdsh_opts->name))) < 0) \
-        {                                                                   \
-            Py_DECREF(pyopts);                                              \
-            return NULL;                                                    \
-        }                                                                   \
-    } while (0)
+#define SETATTR(name, pyinitializer) ({                                 \
+    if ((PyObject_SetAttrString(pyopts, #name,                          \
+                                (pyinitializer)(pdsh_opts->name))) < 0) \
+    {                                                                   \
+        Py_DECREF(pyopts);                                              \
+        return NULL;                                                    \
+    }                                                                   \
+})
 
 #define SETATTR_INT(name)  SETATTR(name, PyInt_FromLong)
 #define SETATTR_BOOL(name) SETATTR(name, PyBool_FromLong)
@@ -366,50 +412,48 @@ fill_pdshopt_from_pyobject(opt_t *pdsh_opts, PyObject *pyopts)
     PyObject *val = NULL;
     PyObject *strval = NULL;
 
-#define FILLATTR(name, pyextractor)                                         \
-    do {                                                                    \
-        val = PyObject_GetAttrString(pyopts, #name);                        \
-        if (val == NULL)                                                    \
-            return 0;                                                       \
-        pdsh_opts->name = pyextractor(val);                                 \
-        Py_DECREF(val);                                                     \
-        if (PyErr_Occurred())                                               \
-            return 0;                                                       \
-    } while (0)
+#define FILLATTR(name, pyextractor) ({                                  \
+    val = PyObject_GetAttrString(pyopts, #name);                        \
+    if (val == NULL)                                                    \
+        return 0;                                                       \
+    pdsh_opts->name = (pyextractor)(val);                               \
+    Py_DECREF(val);                                                     \
+    if (PyErr_Occurred())                                               \
+        return 0;                                                       \
+})
 
 #define FILLATTR_INT(name)  FILLATTR(name, PyIntOrNone_AsLong)
 #define FILLATTR_BOOL(name) FILLATTR(name, PyObject_IsTrue)
 
-#define FILLATTR_STR(name)                                                  \
-    do {                                                                    \
-        val = PyObject_GetAttrString(pyopts, #name);                        \
-        if (val == NULL)                                                    \
-            return 0;                                                       \
-        if (val == Py_None)                                                 \
-        {                                                                   \
-            if (pdsh_opts->name != NULL)                                    \
-                Free((void **)&(pdsh_opts->name));                          \
-            Py_DECREF(val);                                                 \
-        }                                                                   \
-        else                                                                \
-        {                                                                   \
-            strval = PyObject_Bytes(val);                                   \
-            Py_DECREF(val);                                                 \
-            if (strval == NULL)                                             \
-                return 0;                                                   \
-            if (pdsh_opts->name == NULL)                                    \
-                pdsh_opts->name = Strdup(PyBytes_AsString(strval));         \
-            else if (strcmp(pdsh_opts->name, PyBytes_AsString(strval)))     \
-            {                                                               \
-                Free((void **)&(pdsh_opts->name));                          \
-                pdsh_opts->name = Strdup(PyBytes_AsString(strval));         \
-                Py_DECREF(strval);                                          \
-                if (pdsh_opts->name == NULL)                                \
-                    return 0;                                               \
-            }                                                               \
-            Py_DECREF(strval);                                              \
-        }                                                                   \
-    } while (0)
+#define FILLATTR_STR(name) ({                                           \
+    val = PyObject_GetAttrString(pyopts, #name);                        \
+    if (val == NULL)                                                    \
+        return 0;                                                       \
+    if (val == Py_None)                                                 \
+    {                                                                   \
+        if (pdsh_opts->name != NULL)                                    \
+            Free((void **)&(pdsh_opts->name));                          \
+        Py_DECREF(val);                                                 \
+    }                                                                   \
+    else                                                                \
+    {                                                                   \
+        strval = PyObject_Bytes(val);                                   \
+        Py_DECREF(val);                                                 \
+        if (strval == NULL)                                             \
+            return 0;                                                   \
+        if (pdsh_opts->name == NULL)                                    \
+            pdsh_opts->name = Strdup(PyBytes_AsString(strval));         \
+        else if (strcmp(pdsh_opts->name, PyBytes_AsString(strval)))     \
+        {                                                               \
+            Free((void **)&(pdsh_opts->name));                          \
+            pdsh_opts->name = Strdup(PyBytes_AsString(strval));         \
+            Py_DECREF(strval);                                          \
+            if (pdsh_opts->name == NULL)                                \
+                return 0;                                               \
+        }                                                               \
+        Py_DECREF(strval);                                              \
+    }                                                                   \
+})
 
     FILLATTR_STR(progname);
     FILLATTR_BOOL(debug);
