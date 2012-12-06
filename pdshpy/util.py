@@ -2,7 +2,12 @@
 #
 # (bits that are easier to implement in straight python)
 
-from _pdshpy_internal import _register_option, _rcmd_register_defaults
+try:
+    from _pdshpy_internal import _register_option, _rcmd_register_defaults
+except ImportError:
+    # allow module to be imported without error, for the sake of linting
+    # and so on, even when not run under pdshpy proper.
+    _register_option = _rcmd_register_defaults = None
 
 
 class PdshOpts:
